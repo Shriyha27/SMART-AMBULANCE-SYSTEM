@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Smart Ambulance System</title>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+
+<style>
+
+/* GLOBAL */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    font-family: 'Segoe UI', sans-serif;
+}
+
+body {
+    background: linear-gradient(135deg, #1d2671, #c33764);
+    color: white;
+}
+
+/* HERO */
+.hero {
+    text-align: center;
+    padding: 40px 20px;
+}
+
+.hero h1 {
+    font-size: 36px;
+}
+
+.hero p {
+    opacity: 0.8;
+    margin: 10px 0 20px;
+}
+
+/* SEARCH */
+.search-box {
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.search-box input {
+    padding: 15px;
+    width: 300px;
+    border-radius: 30px;
+    border: none;
+}
+
+/* BUTTON BASE */
+.search-box button {
+    padding: 12px 18px;
+    border-radius: 30px;
+    border: none;
+    color: white;
+    cursor: pointer;
+    transition: 0.3s;
+}
+
+/* BUTTON COLORS */
+.btn-search {
+    background: linear-gradient(135deg, #a76bcf, #dd2476);
+}
+
+.btn-gps {
+    background: linear-gradient(135deg, #a76bcf, #dd2476);
+}
+
+.btn-emergency {
+    background: linear-gradient(135deg, #a76bcf, #dd2476);
+}
+
+/* HOVER */
+.btn-search:hover,
+.btn-gps:hover,
+.btn-emergency:hover {
+    transform: scale(1.1);
+    filter: brightness(1.1);
+}
+
+/* STATUS */
+.status-bar {
+    margin-top: 20px;
+    display: flex;
+    justify-content: center;
+    gap: 20px;
+    flex-wrap: wrap;
+}
+
+/* MAP */
+#map {
+    height: 400px;
+    margin: 20px;
+    border-radius: 20px;
+}
+
+/* RESULTS */
+#results {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px,1fr));
+    gap: 15px;
+    padding: 20px;
+}
+
+.card {
+    background: rgba(255,255,255,0.15);
+    backdrop-filter: blur(12px);
+    padding: 15px;
+    border-radius: 15px;
+    cursor: pointer;
+    transition: 0.3s;
+}
+
+.card:hover {
+    transform: translateY(-5px);
+}
+
+/* SELECTED */
+.emergency {
+    border: 2px solid red;
+    box-shadow: 0 0 20px red;
+}
+
+/* NAV BUTTON */
+a button {
+    width: 100%;
+    margin-top: 10px;
+    background: linear-gradient(135deg, #25c96a, #3adb6d);
+}
+
+</style>
+</head>
+
+<body>
+
+<div class="hero">
+    <h1>🚑 Smart Ambulance System</h1>
+    <p>Real-time Emergency Routing & Hospital Finder</p>
+
+    <div class="search-box">
+        <input id="locationInput" placeholder="Enter location">
+        <button class="btn-search" onclick="searchLocation()">🔍 Search</button>
+        <button class="btn-gps" onclick="useGPS()">📍 Use GPS</button>
+        <button class="btn-emergency" onclick="toggleEmergency()">🚨 Emergency</button>
+    </div>
+
+    <div class="status-bar">
+        <span>🏥 Hospitals Found: <b id="hospitalCount">0</b></span>
+        <span>📍 Selected Hospital: <b id="selectedHospital">None</b></span>
+        <span>🚨 Emergency Mode: <b id="emergencyStatus">OFF</b></span>
+    </div>
+</div>
+
+<div id="map"></div>
+<div id="results"></div>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+<script>
+
+let map = L.map('map').setView([13.0827, 80.2707], 13);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+let hospitalMarkers = [];
+let routeLine, ambulanceMarker;
+let emergencyMode = false;
+let selectedHospitalCard = null;
+
+/* CLEAR */
+function clearMap(){
+    hospitalMarkers.forEach(m=>map.removeLayer(m));
+    hospitalMarkers=[];
+    if(routeLine) map.removeLayer(routeLine);
+}
+
+/* COORDS */
+async function getCoords(place){
+    let res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${place}`);
+    let data = await res.json();
+    return data.length ? data[0] : null;
+}
+
+/* DISTANCE */
+function distance(a,b,c,d){
+    let R=6371;
+    let dLat=(c-a)*Math.PI/180;
+    let dLon=(d-b)*Math.PI/180;
+    let x=Math.sin(dLat/2)**2+
+    Math.cos(a*Math.PI/180)*Math.cos(c*Math.PI/180)*
+    Math.sin(dLon/2)**2;
+    return (R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x))).toFixed(2);
+}
+
+/* BEDS */
+function getBedAvailability(){
+    return {
+        totalBeds: Math.floor(Math.random()*200)+50,
+        availableBeds: Math.floor(Math.random()*50),
+        icuBeds: Math.floor(Math.random()*20),
+        emergency: Math.random()>0.5?"Available":"Busy"
+    };
+}
+
+/* EMERGENCY */
+function toggleEmergency(){
+    emergencyMode=!emergencyMode;
+    document.getElementById("emergencyStatus").innerText = emergencyMode?"ON":"OFF";
+
+    let btn = document.querySelector(".btn-emergency");
+
+    if(emergencyMode){
+        btn.style.boxShadow = "0 0 20px red";
+    } else {
+        btn.style.boxShadow = "none";
+    }
+}
+
+/* FIND */
+async function findHospitals(lat,lon){
+    clearMap();
+
+    let query=`[out:json];node["amenity"="hospital"](around:5000,${lat},${lon});out;`;
+    let res=await fetch("https://overpass-api.de/api/interpreter",{method:"POST",body:query});
+    let data=await res.json();
+
+    let hospitals=data.elements.map(h=>({
+        name:h.tags.name||"Hospital",
+        lat:h.lat, lon:h.lon,
+        dist:distance(lat,lon,h.lat,h.lon)
+    }));
+
+    hospitals.sort((a,b)=>a.dist-b.dist);
+    displayHospitals(hospitals,lat,lon);
+
+    document.getElementById("hospitalCount").innerText=hospitals.length;
+
+    if(emergencyMode && hospitals.length>0){
+        showHospitalDetails(hospitals[0],lat,lon,null);
+    }
+}
+
+/* DISPLAY */
+function displayHospitals(hospitals,userLat,userLon){
+    let results=document.getElementById("results");
+    results.innerHTML="";
+
+    hospitals.forEach(h=>{
+        let card=document.createElement("div");
+        card.className="card";
+        card.innerHTML=`
+            <b>🏥 ${h.name}</b><br>
+            📍 Distance: ${h.dist} km
+        `;
+
+        card.onclick=()=>showHospitalDetails(h,userLat,userLon,card);
+
+        results.appendChild(card);
+
+        let marker=L.marker([h.lat,h.lon]).addTo(map);
+        hospitalMarkers.push(marker);
+    });
+}
+
+/* DETAILS */
+function showHospitalDetails(h,userLat,userLon,card){
+
+    if(selectedHospitalCard) selectedHospitalCard.classList.remove("emergency");
+    if(card){ card.classList.add("emergency"); selectedHospitalCard=card;}
+
+    let old=document.getElementById("detailCard");
+    if(old) old.remove();
+
+    map.setView([h.lat,h.lon],16);
+    drawRoute(userLat,userLon,h.lat,h.lon);
+
+    let beds=getBedAvailability();
+    document.getElementById("selectedHospital").innerText=h.name;
+
+    let nav=`https://www.google.com/maps/dir/?api=1&origin=${userLat},${userLon}&destination=${h.lat},${h.lon}`;
+
+    let detail=document.createElement("div");
+    detail.id="detailCard";
+    detail.className="card emergency";
+
+    detail.innerHTML=`
+    <h3>🚑 Selected Hospital Details</h3>
+
+    <b>🏥 ${h.name}</b><br><br>
+
+    📍 Distance: ${h.dist} km<br>
+    🛏️ Available Beds: ${beds.availableBeds}/${beds.totalBeds}<br>
+    🏥 ICU Beds: ${beds.icuBeds}<br>
+    🚨 Emergency Status: ${beds.emergency}<br>
+
+    <a href="${nav}" target="_blank">
+        <button>🚗 Navigate to Hospital</button>
+    </a>
+    `;
+
+    document.getElementById("results").prepend(detail);
+}
+
+/* ROUTE */
+function drawRoute(a,b,c,d){
+    if(routeLine) map.removeLayer(routeLine);
+    routeLine=L.polyline([[a,b],[c,d]],{color:'red'}).addTo(map);
+    simulateAmbulance(a,b,c,d);
+}
+
+/* AMBULANCE */
+function simulateAmbulance(a,b,c,d){
+    if(ambulanceMarker) map.removeLayer(ambulanceMarker);
+
+    let steps=40,i=0;
+    let latStep=(c-a)/steps, lonStep=(d-b)/steps;
+
+    ambulanceMarker=L.marker([a,b]).addTo(map);
+
+    let t=setInterval(()=>{
+        if(i>=steps) return clearInterval(t);
+        a+=latStep; b+=lonStep;
+        ambulanceMarker.setLatLng([a,b]);
+        i++;
+    },200);
+}
+
+/* SEARCH */
+async function searchLocation(){
+    let loc=document.getElementById("locationInput").value;
+    let data=await getCoords(loc);
+    if(!data) return alert("Location not found");
+
+    map.setView([data.lat,data.lon],14);
+    findHospitals(data.lat,data.lon);
+}
+
+/* GPS */
+function useGPS(){
+    navigator.geolocation.getCurrentPosition(pos=>{
+        let lat=pos.coords.latitude;
+        let lon=pos.coords.longitude;
+        map.setView([lat,lon],14);
+        findHospitals(lat,lon);
+    });
+}
+
+</script>
+
+</body>
+</html>
